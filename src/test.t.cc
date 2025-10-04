@@ -5,8 +5,8 @@
 #include <cassert>
 #include <iostream>
 #include <memory_resource>
-
-// makeshift gtest...
+#include <random>
+#include <thread>
 
 void alloc_test() {
   // extra for the freelist....
@@ -14,7 +14,7 @@ void alloc_test() {
   std::pmr::monotonic_buffer_resource buf{buffer, 1300,
                                           std::pmr::null_memory_resource()};
 
-  tftf::node_resource resource{buf};
+  tftf::node_resource<500> resource{buf};
 
   void *p1 = resource.allocate(500);
   void *p2 = resource.allocate(500);
@@ -40,7 +40,7 @@ void alloc_test() {
 void integration_test() {
   tftf::faster<int, int> f;
   std::pmr::monotonic_buffer_resource buf{1000};
-  tftf::node_resource resource{buf};
+  tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
 
   tftf::worker_state state{resource};
 
@@ -97,9 +97,76 @@ void integration_test() {
   }
   std::cerr << "passed all integration tests!\n";
 }
+
+void delete_heavy_test() {
+
+  tftf::faster<int, int> f;
+  std::pmr::monotonic_buffer_resource buf{1000};
+  tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
+
+  tftf::worker_state state{resource};
+
+  std::cerr << "passed delete test!\n";
+}
+
+void basic_multithread_test() {
+
+  tftf::faster<int, int> f;
+  const size_t n_threads = 5;
+  const size_t n_inserts = 1000;
+
+  std::atomic<uint64_t> correct_count;
+
+  auto insert_job = [&correct_count, &f](uint32_t seed) {
+    std::pmr::monotonic_buffer_resource buf{100000};
+    tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
+
+    tftf::worker_state state{resource};
+    std::mt19937 rng{seed};
+    std::uniform_int_distribution<int> dist(0, 10000000);
+
+    for (size_t i = 0; i < n_inserts; i++) {
+      int k = dist(rng);
+      int v = dist(rng);
+
+      f.put(state, k, v);
+    }
+
+    std::mt19937 rng2{seed};
+    for (size_t i = 0; i < n_inserts; i++) {
+      int k = dist(rng2);
+      int v = dist(rng2);
+
+      if (auto x = f.get(state, k); x && *x == v) {
+        correct_count++;
+      }
+    }
+  };
+
+  {
+    // apple doesn't have jthread? 1984
+    std::vector<std::thread> threads;
+
+    for (uint32_t i = 0; i < n_threads; i++) {
+      threads.push_back(std::thread{insert_job, i});
+    }
+
+    for (auto &t : threads) {
+      t.join();
+    }
+
+    // this seems reasonable to assume 90% of the things won't be contended (we
+    // can probably get some guarantee...)
+    assert(correct_count * 1.0 / n_inserts / n_threads > 0.9);
+  }
+  std::cerr << "passed multi test 1!\n";
+}
+
 auto main() -> int {
   alloc_test();
   integration_test();
+  delete_heavy_test();
+  basic_multithread_test();
 
   std::cerr << "all tests passed!\n";
 }

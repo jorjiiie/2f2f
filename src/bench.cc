@@ -19,3 +19,16 @@
 #include <atomic>
 #include <format>
 #include <iostream>
+
+// what's the format of this?
+// we have a TABLE and we want to construct it?
+// like we have a few setups
+//
+
+namespace tftf {
+
+struct BenchResults {};
+template <class TableBench> BenchResults benchmark(TableBench bench) {
+  typename TableBench::Table table = bench.get_table();
+}
+} // namespace tftf

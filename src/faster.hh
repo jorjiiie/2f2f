@@ -1,11 +1,9 @@
 #pragma once
 
-#include "common.hh"
 #include "logging.hh"
 #include "state.hh"
 
 #include <atomic>
-#include <format>
 #include <optional>
 #include <vector>
 
@@ -21,7 +19,7 @@ public:
 
   /// @brief accessor function. value semantics because we don't expect values
   /// to be large
-  auto get(worker_state &state, const Key &key) -> std::optional<Value> {
+  auto get(worker_state & /*state*/, const Key &key) -> std::optional<Value> {
     std::size_t index = get_bucket(key);
 
     return get_internal(index, key);
@@ -38,21 +36,21 @@ public:
 
     // for now, we only epoch here. this just means that the latency for put
     // *can* explode.
-    void *node_mem = state.resource.allocate(sizeof(list_node));
+    void *node_mem = state.resource.allocate(alloc_size);
 
     list_node *new_node = new (node_mem)
         list_node(std::forward<Key_>(key), std::forward<Value_>(value));
 
     bool placed = put_internal(index, new_node);
     if (!placed) {
-      state.resource.deallocate(new_node, sizeof(list_node));
+      state.resource.deallocate(new_node, alloc_size);
     }
     return placed;
   }
 
   /// @brief update an entry. Returns the old value (if present)
   template <class UpdateFn>
-  auto update(worker_state &state, const Key &key, UpdateFn &&fn)
+  auto update(worker_state & /*state*/, const Key &key, UpdateFn &&fn)
       -> std::optional<Value> {
     std::size_t index = get_bucket(key);
 
@@ -69,12 +67,18 @@ public:
   }
 
 private:
+  struct list_node;
+
+public:
+  static constexpr std::size_t alloc_size = sizeof(list_node);
+
+private:
   // TODO: THINK ABOUT THE ALIGN OF THIS
   struct list_node {
     Key key;
     // Value value;
-    tftf::atomic<Value> value;
-    using atomic_ptr = tftf::atomic<list_node *>;
+    std::atomic<Value> value;
+    using atomic_ptr = std::atomic<list_node *>;
     atomic_ptr next;
   };
   using atomic_ptr = list_node::atomic_ptr;
@@ -172,7 +176,7 @@ private:
   auto erase_internal(std::size_t index, worker_state &state, const Key &key)
       -> bool {
     atomic_ptr &ptr = m_table[index];
-    list_node *lag = ptr.load(std::memory_order_release);
+    list_node *lag = ptr.load(std::memory_order_acquire);
 
     if (lag == nullptr) {
       return false;
@@ -182,31 +186,68 @@ private:
     // base case: table swap
     if (lag->key == key) {
       // erase this node
-      if (ptr.compare_exchange_strong(lag, node) == false) {
-        // try again: the only case this happens is a concurrent read.
-        // but I think it's possible for things to get alientated here
-        // TODO: think about this operation
-        return erase_internal(index, state, key);
+      if (ptr.compare_exchange_strong(lag, node)) {
+        state.freelist_add(alloc_block{lag, state.epoch});
+        return true;
       }
-      // spliced this node out
-      state.freelist_add(alloc_block{lag, sizeof(list_node)});
-      return true;
+      return erase_internal(index, state, key);
     }
 
     while (node != nullptr) {
       list_node *next = node->next.load(std::memory_order_acquire);
       if (node->key == key) {
         if (lag->next.compare_exchange_strong(node, next)) {
-          state.freelist_add(alloc_block{node, sizeof(list_node)});
+          state.freelist_add(alloc_block{node, state.epoch});
           return true;
         }
-        // try again (think)
         return erase_internal(index, state, key);
       }
       lag = node;
       node = next;
     }
     return false;
+  }
+
+  // TODO: (really to benchmark): can consolidate all the free/alloc stuff into
+  // a big lock free queue which would better distribute the load (we can only
+  // realloc if this worker has a corresponding delete call! so if the load is
+  // badly distributed, then this will also be badly distributed) would be a
+  // mcmp queue, so will be a "objective" performance hit in tradeoff for better
+  // distribution
+  void major_tick(worker_state &state) {
+    std::uint64_t safe_epoch;
+
+    // make sure the shared epoch is at least ours
+    do {
+      // this algorithm is totally incorrect: everyone needs to ack this before
+      // we can move it.
+      // we can't be oblivious to the workers here.
+      safe_epoch = m_safe_epoch.load(std::memory_order_acquire);
+      m_safe_epoch.compare_exchange_strong(safe_epoch,
+                                           std::max(safe_epoch, state.epoch));
+    } while (safe_epoch < state.epoch);
+
+    // safe epoch is now at least the state's epoch!
+    state.epoch = safe_epoch + 1;
+
+    auto &delete_list = state.freelist;
+    // here, we only deallocate our own resources
+    // this doesn't feel great!
+    // i really want to write a mpmc queue and see how this works
+    while (!delete_list.empty() && delete_list.front().epoch < safe_epoch) {
+      // actually deallocate this!
+      auto front = delete_list.begin();
+      state.resource.deallocate(front->ptr, alloc_size);
+
+      delete_list.erase(front);
+    }
+  }
+  void minor_tick(worker_state &state) {
+    state.ticks++;
+    if (state.ticks == minors_per_major) [[unlikely]] {
+      major_tick(state);
+      state.ticks = 0;
+    }
   }
 
   auto get_bucket(const Key &key) -> std::size_t {
@@ -216,5 +257,7 @@ private:
   // do not grow though!
   std::vector<atomic_ptr> m_table;
   std::atomic<std::size_t> m_size;
+  std::atomic<std::uint64_t> m_safe_epoch;
+  static constexpr uint64_t minors_per_major{10'000};
 };
 } // namespace tftf
