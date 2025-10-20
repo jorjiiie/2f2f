@@ -111,55 +111,95 @@ void delete_heavy_test() {
 
 void basic_multithread_test() {
 
-  tftf::faster<int, int> f;
-  const size_t n_threads = 5;
-  const size_t n_inserts = 1000;
+  double mn = 10000;
 
-  std::atomic<uint64_t> correct_count;
+  constexpr size_t n_threads = 5;
+  constexpr size_t n_inserts = 10000;
 
-  auto insert_job = [&correct_count, &f](uint32_t seed) {
-    std::pmr::monotonic_buffer_resource buf{100000};
-    tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
+  for (size_t _k = 0; _k < 100; _k++) {
 
-    tftf::worker_state state{resource};
-    std::mt19937 rng{seed};
-    std::uniform_int_distribution<int> dist(0, 10000000);
+    tftf::faster<int, int> f{5000};
 
-    for (size_t i = 0; i < n_inserts; i++) {
-      int k = dist(rng);
-      int v = dist(rng);
+    constexpr int _M = n_threads * n_inserts;
 
-      f.put(state, k, v);
-    }
+    // as long as _M < 1e6 this is okay
+    assert(_M < 1'000'000 && "probably too many inserts being tried");
 
-    std::mt19937 rng2{seed};
-    for (size_t i = 0; i < n_inserts; i++) {
-      int k = dist(rng2);
-      int v = dist(rng2);
+    constexpr int _N = _M * 1000;
 
-      if (auto x = f.get(state, k); x && *x == v) {
-        correct_count++;
+    std::atomic<size_t> done_count;
+    std::atomic<bool> done_flag{false};
+
+    auto insert_job = [&f, &done_count, &done_flag](uint32_t seed) {
+      std::pmr::monotonic_buffer_resource buf{100000};
+      tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
+
+      tftf::worker_state state{resource};
+      std::mt19937 rng{seed};
+      std::uniform_int_distribution<int> dist(0, _N);
+
+      for (size_t i = 0; i < n_inserts; i++) {
+        int k = dist(rng);
+        int v = dist(rng);
+
+        f.put(state, k, v);
       }
-    }
-  };
 
-  {
+      done_count.fetch_add(1);
+      while (!done_flag.load()) {
+        std::this_thread::yield();
+      }
+    };
+
     // apple doesn't have jthread? 1984
     std::vector<std::thread> threads;
 
     for (uint32_t i = 0; i < n_threads; i++) {
-      threads.push_back(std::thread{insert_job, i});
+      threads.push_back(std::thread{insert_job, i + _k * n_threads});
     }
+
+    while (done_count.load() < n_threads) {
+      std::this_thread::yield();
+    }
+
+    uint64_t correct_count{};
+    for (uint32_t i = 0; i < n_threads; i++) {
+      tftf::worker_state state{*std::pmr::get_default_resource()};
+      std::uniform_int_distribution<int> dist(0, _N);
+      std::mt19937 rng2{(uint32_t)(i + _k * n_threads)};
+      for (size_t i = 0; i < n_inserts; i++) {
+        int k = dist(rng2);
+        int v = dist(rng2);
+
+        if (auto x = f.get(state, k); x && *x == v) {
+          correct_count++;
+        }
+      }
+    }
+
+    done_flag.store(true);
 
     for (auto &t : threads) {
       t.join();
     }
 
-    // this seems reasonable to assume 90% of the things won't be contended (we
-    // can probably get some guarantee...)
-    assert(correct_count * 1.0 / n_inserts / n_threads > 0.9);
+    // see blog post for an explaination
+    assert(correct_count * 1.0 / n_inserts / n_threads > 0.999);
+    mn = std::min(mn, correct_count * 1.0 / n_inserts / n_threads);
+    // std::cerr << correct_count * 1.0 / n_inserts / n_threads << "\n";
   }
-  std::cerr << "passed multi test 1!\n";
+
+  std::cerr << "passed multi test 1!: for reference, min was " << mn << "\n";
+}
+
+void basic_multithread_mixed_test() {
+  /*
+    tftf::faster<int, int> f;
+    const size_t n_threads = 5;
+    const size_t n_inserts = 10000;
+
+    std::atomic<uint64_t> correct_count;
+    */
 }
 
 auto main() -> int {
@@ -167,6 +207,7 @@ auto main() -> int {
   integration_test();
   delete_heavy_test();
   basic_multithread_test();
+  basic_multithread_mixed_test();
 
   std::cerr << "all tests passed!\n";
 }
