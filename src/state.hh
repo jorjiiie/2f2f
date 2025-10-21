@@ -22,6 +22,7 @@ struct worker_state {
   std::list<alloc_block> freelist{};
   std::uint64_t epoch{0};
   std::uint64_t ticks{0};
+  size_t index{0};
 
   void freelist_add(alloc_block block) {
     epoch++;

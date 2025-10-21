@@ -8,9 +8,14 @@
 #include <vector>
 
 namespace tftf {
+struct default_faster_traits {
+  static constexpr size_t max_workers = 1'024;
+  static constexpr size_t minor_ticks_per_major = 10'000;
+};
 // store K-V
 // TODO: enable all warnings for clangd
-template <class Key, class Value> class faster {
+template <class Key, class Value, class Traits = default_faster_traits>
+class faster {
 public:
   faster(std::size_t table_size = 128)
       : m_table(table_size), m_size(table_size) {}
@@ -64,6 +69,15 @@ public:
     std::size_t index = get_bucket(key);
 
     return erase_internal(index, state, key);
+  }
+
+  // not sure if this is a good idea.
+  // we operate on the simplifying assumption that no workers leave
+  // TODO: might be a good idea to get the worker from here (and so it's private
+  // and we can't construct externally, to get the invariant everything is
+  // initialized)
+  auto register_worker(worker_state &state) -> void {
+    state.index = m_workers.fetch_add(1);
   }
 
 private:
@@ -173,6 +187,8 @@ private:
     }
     return std::nullopt;
   }
+
+  // erasing causes an epoch event
   auto erase_internal(std::size_t index, worker_state &state, const Key &key)
       -> bool {
     atomic_ptr &ptr = m_table[index];
@@ -181,30 +197,35 @@ private:
     if (lag == nullptr) {
       return false;
     }
+    auto exec = [this, &state] [[nodiscard]] (list_node * ptr) {
+      uint64_t epoch = m_epoch.fetch_add(1);
+      state.freelist_add(alloc_block{ptr, epoch});
+      return true;
+    };
 
     list_node *node = lag->next.load(std::memory_order_acquire);
     // base case: table swap
     if (lag->key == key) {
       // erase this node
       if (ptr.compare_exchange_strong(lag, node)) {
-        state.freelist_add(alloc_block{lag, state.epoch});
-        return true;
+        return exec(lag);
       }
       return erase_internal(index, state, key);
     }
 
+    // standard case: traverse the list
     while (node != nullptr) {
       list_node *next = node->next.load(std::memory_order_acquire);
       if (node->key == key) {
         if (lag->next.compare_exchange_strong(node, next)) {
-          state.freelist_add(alloc_block{node, state.epoch});
-          return true;
+          return exec(lag);
         }
         return erase_internal(index, state, key);
       }
       lag = node;
       node = next;
     }
+    // not found
     return false;
   }
 
@@ -215,22 +236,19 @@ private:
   // mcmp queue, so will be a "objective" performance hit in tradeoff for better
   // distribution
   void major_tick(worker_state &state) {
-    std::uint64_t safe_epoch;
+    // we are guaranteed at least this thread is registered
+    uint64_t safe_epoch = m_epochs[0].load(std::memory_order_acquire);
+    uint64_t current_workers = m_workers.load(std::memory_order_acquire);
 
-    // make sure the shared epoch is at least ours
-    do {
-      // this algorithm is totally incorrect: everyone needs to ack this before
-      // we can move it.
-      // we can't be oblivious to the workers here.
-      safe_epoch = m_safe_epoch.load(std::memory_order_acquire);
-      m_safe_epoch.compare_exchange_strong(safe_epoch,
-                                           std::max(safe_epoch, state.epoch));
-    } while (safe_epoch < state.epoch);
-
-    // safe epoch is now at least the state's epoch!
-    state.epoch = safe_epoch + 1;
+    // calculate the safe epoch each time we do a gc (we don't need to do it
+    // more than this, since this is the only place we use the epoch)
+    for (size_t i = 1; i < current_workers; ++i) {
+      safe_epoch =
+          std::min(safe_epoch, m_epochs[i].load(std::memory_order_acquire));
+    }
 
     auto &delete_list = state.freelist;
+
     // here, we only deallocate our own resources
     // this doesn't feel great!
     // i really want to write a mpmc queue and see how this works
@@ -241,10 +259,17 @@ private:
 
       delete_list.erase(front);
     }
+
+    // update our thread epoch to ack
+    state.epoch = m_epoch.load(std::memory_order_acquire);
   }
   void minor_tick(worker_state &state) {
     state.ticks++;
     if (state.ticks == minors_per_major) [[unlikely]] {
+      // refresh on major ticks: maybe too infrequent? we'll at worst double our
+      // "pileup" between major states, might not be the worst after the first
+      // one
+      state.epoch = m_epoch.load(std::memory_order_acquire);
       major_tick(state);
       state.ticks = 0;
     }
@@ -256,8 +281,13 @@ private:
 
   // do not grow though!
   std::vector<atomic_ptr> m_table;
-  std::atomic<std::size_t> m_size;
-  std::atomic<std::uint64_t> m_safe_epoch;
-  static constexpr uint64_t minors_per_major{10'000};
+  tftf::atomic<size_t> m_size;
+  tftf::atomic<uint64_t> m_epoch;
+  static constexpr uint64_t minors_per_major{Traits::minor_ticks_per_major};
+
+  static constexpr size_t max_workers{Traits::max_workers};
+  // TODO: investigate cache alignment here
+  std::array<tftf::atomic<uint64_t>, max_workers> m_epochs{};
+  tftf::atomic<size_t> m_workers{0};
 };
 } // namespace tftf
