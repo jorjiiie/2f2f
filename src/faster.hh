@@ -37,6 +37,7 @@ public:
              std::is_convertible_v<Value_, Value>
   auto put(worker_state &state, Key_ &&key, Value_ &&value) -> bool {
 
+    minor_tick(state);
     std::size_t index = get_bucket(key);
 
     // for now, we only epoch here. this just means that the latency for put
@@ -180,6 +181,7 @@ private:
     while (node != nullptr) {
       if (node->key == key) {
         const Value old_ = node->value.load(std::memory_order_acquire);
+        // we don't CAS because it doesn't matter (non deterministic anyways)
         node->value.store(fn(old_), std::memory_order_release);
         return old_;
       }
@@ -261,7 +263,7 @@ private:
     }
 
     // update our thread epoch to ack
-    state.epoch = m_epoch.load(std::memory_order_acquire);
+    // state.epoch = m_epoch.load(std::memory_order_acquire);
   }
   void minor_tick(worker_state &state) {
     state.ticks++;
@@ -269,7 +271,11 @@ private:
       // refresh on major ticks: maybe too infrequent? we'll at worst double our
       // "pileup" between major states, might not be the worst after the first
       // one
-      state.epoch = m_epoch.load(std::memory_order_acquire);
+      // updating the epoch is a bug apparently because it affects how often
+      // things are correct?
+      // this should not influence the accuracy ratio, but it does. fmrcl.
+      m_epochs[state.index].store(m_epoch.load(std::memory_order_acquire),
+                                  std::memory_order_release);
       major_tick(state);
       state.ticks = 0;
     }
