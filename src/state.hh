@@ -20,12 +20,10 @@ struct worker_state {
   // allocator but that will face contention on alloc/dealloc of the freelist
   // nodes, using the global malloc lock. not great!
   std::list<alloc_block> freelist{};
-  std::uint64_t epoch{0};
   std::uint64_t ticks{0};
   size_t index{0};
 
   void freelist_add(alloc_block block) {
-    epoch++;
     // now this has allocation problems...
     freelist.push_back(block);
   }

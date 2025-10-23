@@ -215,10 +215,13 @@ void basic_multithread_mixed_test() {
   for (size_t _k = 0; _k < 100; _k++) {
     std::atomic<size_t> done_count;
     std::atomic<bool> done_flag{false};
+    std::atomic<size_t> delete_good{0};
+    std::atomic<size_t> delete_total{0};
 
     tftf::faster<int, int, eager_delete> f{5000};
 
-    auto insert_job = [&f, &done_count, &done_flag](uint32_t seed) {
+    auto insert_job = [&f, &done_count, &done_flag, &delete_good,
+                       &delete_total](uint32_t seed) {
       std::pmr::monotonic_buffer_resource buf{100000};
       tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
 
@@ -242,8 +245,9 @@ void basic_multithread_mixed_test() {
         } else {
           int k = dist(rng_lag);
           dist(rng_lag);
+          delete_total++;
 
-          f.erase(state, k);
+          delete_good += f.erase(state, k);
         }
       }
 
@@ -251,6 +255,10 @@ void basic_multithread_mixed_test() {
       while (!done_flag.load()) {
         std::this_thread::yield();
       }
+
+      f.check_reachable_deleted_pointers(state);
+
+      std::this_thread::sleep_for(std::chrono::nanoseconds{1'000'000});
     };
 
     // apple doesn't have jthread? 1984
@@ -286,7 +294,9 @@ void basic_multithread_mixed_test() {
     }
 
     // see blog post for an explaination
-    std::cerr << correct_count * 1.0 / n_inserts / n_threads << "\n";
+    std::cerr << correct_count * 1.0 / n_inserts / n_threads << " with "
+              << delete_good * 1.0 / delete_total << " " << delete_total
+              << "\n";
   }
   std::cerr << "passed multi test 2!\n";
 }

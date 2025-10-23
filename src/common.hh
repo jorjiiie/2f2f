@@ -33,6 +33,6 @@ template <class F> struct ScopeExit {
 };
 
 template <class F> auto on_scope_exit(F &&f) -> ScopeExit<F> {
-  return ScopeExit<F>(std::forward(f));
+  return ScopeExit<F>(std::forward<F>(f));
 }
 } // namespace tftf

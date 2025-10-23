@@ -1,11 +1,14 @@
 #pragma once
 
+#include "common.hh"
 #include "logging.hh"
 #include "state.hh"
 
 #include <atomic>
 #include <optional>
 #include <vector>
+
+#include <unordered_set>
 
 namespace tftf {
 struct default_faster_traits {
@@ -17,6 +20,40 @@ struct default_faster_traits {
 template <class Key, class Value, class Traits = default_faster_traits>
 class faster {
 public:
+  auto check_reachable_deleted_pointers(worker_state &state) -> size_t {
+    // Build a set of all pointers in this worker's freelist
+    std::unordered_set<void *> my_deleted_ptrs;
+    for (const auto &block : state.freelist) {
+      my_deleted_ptrs.insert(block.ptr);
+    }
+
+    if (my_deleted_ptrs.empty()) {
+      return 0;
+    }
+
+    // Walk all buckets and count how many of our deleted pointers are still
+    // reachable
+    size_t reachable_count = 0;
+
+    for (size_t bucket = 0; bucket < m_table.size(); ++bucket) {
+      atomic_ptr &ptr = m_table[bucket];
+      list_node *current = ptr.load(std::memory_order_acquire);
+
+      while (current != nullptr) {
+        if (my_deleted_ptrs.count(static_cast<void *>(current)) > 0) {
+          reachable_count++;
+          // Optional: print debug info
+          std::printf("Worker %zu: Found reachable deleted pointer in bucket "
+                      "%zu, key=%d\n",
+
+                      state.index, bucket, current->key);
+        }
+        current = current->next.load(std::memory_order_acquire);
+      }
+    }
+
+    return reachable_count;
+  }
   faster(std::size_t table_size = 128)
       : m_table(table_size), m_size(table_size) {}
 
@@ -37,7 +74,9 @@ public:
              std::is_convertible_v<Value_, Value>
   auto put(worker_state &state, Key_ &&key, Value_ &&value) -> bool {
 
-    minor_tick(state);
+    auto scope_exit =
+        tftf::on_scope_exit([this, &state]() { minor_tick(state); });
+
     std::size_t index = get_bucket(key);
 
     // for now, we only epoch here. this just means that the latency for put
@@ -220,7 +259,7 @@ private:
       list_node *next = node->next.load(std::memory_order_acquire);
       if (node->key == key) {
         if (lag->next.compare_exchange_strong(node, next)) {
-          return exec(lag);
+          return exec(node);
         }
         return erase_internal(index, state, key);
       }
@@ -251,32 +290,20 @@ private:
 
     auto &delete_list = state.freelist;
 
-    // here, we only deallocate our own resources
-    // this doesn't feel great!
-    // i really want to write a mpmc queue and see how this works
     while (!delete_list.empty() && delete_list.front().epoch < safe_epoch) {
-      // actually deallocate this!
       auto front = delete_list.begin();
       state.resource.deallocate(front->ptr, alloc_size);
 
       delete_list.erase(front);
     }
-
-    // update our thread epoch to ack
-    // state.epoch = m_epoch.load(std::memory_order_acquire);
   }
   void minor_tick(worker_state &state) {
     state.ticks++;
     if (state.ticks == minors_per_major) [[unlikely]] {
-      // refresh on major ticks: maybe too infrequent? we'll at worst double our
-      // "pileup" between major states, might not be the worst after the first
-      // one
-      // updating the epoch is a bug apparently because it affects how often
-      // things are correct?
-      // this should not influence the accuracy ratio, but it does. fmrcl.
+      // refresh out ack epoch
       m_epochs[state.index].store(m_epoch.load(std::memory_order_acquire),
                                   std::memory_order_release);
-      major_tick(state);
+      // major_tick(state);
       state.ticks = 0;
     }
   }
