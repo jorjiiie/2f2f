@@ -21,6 +21,7 @@ struct worker_state {
   // nodes, using the global malloc lock. not great!
   std::list<alloc_block> freelist{};
   std::uint64_t ticks{0};
+  tftf::atomic<uint64_t> *epoch_counter{nullptr};
   size_t index{0};
 
   void freelist_add(alloc_block block) {

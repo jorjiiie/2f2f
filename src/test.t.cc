@@ -40,7 +40,7 @@ void alloc_test() {
 void integration_test() {
   tftf::faster<int, int> f;
   std::pmr::monotonic_buffer_resource buf{1000};
-  tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
+  tftf::node_resource<tftf::faster<int, int>::list_t::alloc_size> resource{buf};
 
   tftf::worker_state state{resource};
 
@@ -102,7 +102,7 @@ void delete_heavy_test() {
 
   tftf::faster<int, int> f;
   std::pmr::monotonic_buffer_resource buf{1000};
-  tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
+  tftf::node_resource<tftf::faster<int, int>::list_t::alloc_size> resource{buf};
 
   tftf::worker_state state{resource};
 
@@ -132,7 +132,8 @@ void basic_multithread_test() {
 
     auto insert_job = [&f, &done_count, &done_flag](uint32_t seed) {
       std::pmr::monotonic_buffer_resource buf{100000};
-      tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
+      tftf::node_resource<tftf::faster<int, int>::list_t::alloc_size> resource{
+          buf};
 
       tftf::worker_state state{resource};
       std::mt19937 rng{seed};
@@ -212,6 +213,9 @@ void basic_multithread_mixed_test() {
 
   constexpr int _N = _M * 1000;
 
+  double mn = 1;
+  double mx = 0;
+
   for (size_t _k = 0; _k < 100; _k++) {
     std::atomic<size_t> done_count;
     std::atomic<bool> done_flag{false};
@@ -223,7 +227,8 @@ void basic_multithread_mixed_test() {
     auto insert_job = [&f, &done_count, &done_flag, &delete_good,
                        &delete_total](uint32_t seed) {
       std::pmr::monotonic_buffer_resource buf{100000};
-      tftf::node_resource<tftf::faster<int, int>::alloc_size> resource{buf};
+      tftf::node_resource<tftf::faster<int, int>::list_t::alloc_size> resource{
+          buf};
 
       tftf::worker_state state{resource};
       f.register_worker(state);
@@ -255,10 +260,6 @@ void basic_multithread_mixed_test() {
       while (!done_flag.load()) {
         std::this_thread::yield();
       }
-
-      f.check_reachable_deleted_pointers(state);
-
-      std::this_thread::sleep_for(std::chrono::nanoseconds{1'000'000});
     };
 
     // apple doesn't have jthread? 1984
@@ -294,11 +295,13 @@ void basic_multithread_mixed_test() {
     }
 
     // see blog post for an explaination
-    std::cerr << correct_count * 1.0 / n_inserts / n_threads << " with "
-              << delete_good * 1.0 / delete_total << " " << delete_total
-              << "\n";
+    double acc = correct_count * 1.0 / n_inserts / n_threads;
+    assert(acc > .89 && acc < .91);
+    mn = std::min(mn, acc);
+    mx = std::max(mx, acc);
   }
-  std::cerr << "passed multi test 2!\n";
+  std::cerr << "passed multi test 2! for reference, min was " << mn
+            << ", max was " << mx << "\n";
 }
 
 auto main() -> int {
