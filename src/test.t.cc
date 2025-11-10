@@ -43,6 +43,7 @@ void integration_test() {
   tftf::node_resource<tftf::faster<int, int>::list_t::alloc_size> resource{buf};
 
   tftf::worker_state state{resource};
+  f.register_worker(state);
 
   f.put(state, 1, 2);
 
@@ -105,6 +106,7 @@ void delete_heavy_test() {
   tftf::node_resource<tftf::faster<int, int>::list_t::alloc_size> resource{buf};
 
   tftf::worker_state state{resource};
+  f.register_worker(state);
 
   std::cerr << "passed delete test!\n";
 }

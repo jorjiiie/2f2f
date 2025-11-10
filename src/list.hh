@@ -131,6 +131,11 @@ public:
     // no idea what this does? seems like a compaction step
     if (!left->cas_next(right, right_next)) {
       right = search(state, right->key(), left);
+    } else {
+      // doesn't this just get leaked?
+      uint64_t epoch =
+          state.epoch_counter->fetch_add(1, std::memory_order_acquire);
+      state.freelist_add({right, epoch});
     }
     return true;
   }
@@ -187,8 +192,9 @@ private:
         }
 
         uint64_t epoch =
-            state.epoch_counter->fetch_add(1, std::memory_order_relaxed);
+            state.epoch_counter->fetch_add(1, std::memory_order_acquire);
         while (left_next != right) {
+
           left = left_next->next();
           state.freelist_add({left_next, epoch});
           left_next = left;
