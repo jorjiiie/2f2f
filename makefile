@@ -2,7 +2,7 @@
 
 # Compiler and flags
 CXX = g++
-CXXFLAGS = -std=c++23 -Wall -Wextra -O2 -Werror
+CXXFLAGS = -std=c++23 -Wall -Wextra -O2 -Werror -lpthread
 
 # Directories
 SRC_DIR = src

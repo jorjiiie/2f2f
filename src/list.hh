@@ -153,7 +153,7 @@ private:
   node_t *head, *tail;
 
   node_t *search(worker_state &state, const Key &key, node_t *&left) {
-    node_t *left_next;
+    node_t *left_next = nullptr;
     node_t *right;
 
     Compare cmp;
