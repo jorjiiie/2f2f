@@ -70,8 +70,8 @@ public:
 
     std::free(head);
     std::free(tail);
-
-    // TODO: walk list and delete real nodes with proper delete
+    // don't free the other stuff because the state slabs will deallocate them
+    // correctly.
   }
 
   template <class Key_, class Value_>
@@ -132,7 +132,6 @@ public:
     if (!left->cas_next(right, right_next)) {
       right = search(state, right->key(), left);
     } else {
-      // doesn't this just get leaked?
       uint64_t epoch =
           state.epoch_counter->fetch_add(1, std::memory_order_acquire);
       state.freelist_add({right, epoch});

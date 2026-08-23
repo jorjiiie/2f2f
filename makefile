@@ -36,9 +36,13 @@ build-test: $(TEST_SOURCES)
 run-test: $(TEST_TARGET)
 	./$(TEST_TARGET)
 
+# Build the shared backend benchmark
+bench:
+	$(MAKE) -C bench
+
 # Clean build artifacts
 clean:
-	rm -f $(TARGET) $(TEST_TARGET) $(SRC_DIR)/a.out
+	rm -f $(TARGET) $(TEST_TARGET) $(BIN_DIR)/bench $(SRC_DIR)/a.out
 
 # Phony targets
-.PHONY: all clean test build-test run-test
+.PHONY: all clean test build-test run-test bench

@@ -120,7 +120,7 @@ private:
   // do not grow though!
   std::vector<list_t> m_lists;
   tftf::atomic<size_t> m_size;
-  tftf::atomic<uint64_t> m_epoch;
+  tftf::atomic<uint64_t> m_epoch{0};
   static constexpr uint64_t minors_per_major{Traits::minor_ticks_per_major};
 
   static constexpr size_t max_workers{Traits::max_workers};
